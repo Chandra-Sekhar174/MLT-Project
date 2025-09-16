@@ -1,0 +1,29 @@
+import matplotlib.pyplot as plt
+
+# Sample logistics data: number of shipments by transport mode
+transport_modes = ['Road', 'Rail', 'Air', 'Sea']
+shipment_counts = [1200, 800, 450, 950]
+
+# Displaying the data
+print("Transportation and Logistics Report")
+for mode, count in zip(transport_modes, shipment_counts):
+    print(f"{mode}: {count} shipments")
+
+# Creating the bar graph
+plt.figure(figsize=(8, 5))
+bars = plt.bar(transport_modes, shipment_counts, color=['orange', 'green', 'skyblue', 'navy'])
+
+# Adding labels and title
+plt.xlabel('Transport Mode')
+plt.ylabel('Number of Shipments')
+plt.title('Shipment Volume by Transport Mode')
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+
+# Adding value labels on top of bars
+for bar in bars:
+    yval = bar.get_height()
+    plt.text(bar.get_x() + bar.get_width()/2, yval + 20, yval, ha='center', va='bottom')
+
+# Show the plot
+plt.tight_layout()
+plt.show()
