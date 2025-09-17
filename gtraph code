@@ -1,29 +1,290 @@
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.cluster import KMeans
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
 
-# Sample logistics data: number of shipments by transport mode
-transport_modes = ['Road', 'Rail', 'Air', 'Sea']
-shipment_counts = [1200, 800, 450, 950]
+class LogisticsOptimizer:
+    def __init__(self):
+        self.delivery_model = None
+        self.demand_model = None
+        self.scaler = StandardScaler()
+        self.hub_clusters = None
+        
+    def generate_sample_data(self, n_samples=1000):
+        """Generate synthetic logistics data for demonstration"""
+        np.random.seed(42)
+        
+        # Generate delivery data
+        data = {
+            'distance_km': np.random.uniform(5, 200, n_samples),
+            'traffic_density': np.random.uniform(0.1, 1.0, n_samples),
+            'weather_score': np.random.uniform(0.3, 1.0, n_samples),  # 1 = perfect weather
+            'vehicle_capacity': np.random.choice([100, 200, 500, 1000], n_samples),
+            'load_weight': np.random.uniform(50, 800, n_samples),
+            'hour_of_day': np.random.randint(6, 22, n_samples),
+            'day_of_week': np.random.randint(1, 8, n_samples),
+            'fuel_price': np.random.uniform(80, 120, n_samples),  # INR per liter
+            'hub_lat': np.random.uniform(12.0, 28.0, n_samples),  # India latitude range
+            'hub_lng': np.random.uniform(68.0, 97.0, n_samples),  # India longitude range
+        }
+        
+        df = pd.DataFrame(data)
+        
+        # Calculate delivery time based on realistic factors
+        base_time = df['distance_km'] / 30  # Base speed 30 km/h
+        traffic_factor = 1 + df['traffic_density'] * 0.5
+        weather_factor = 2 - df['weather_score']  # Worse weather = higher factor
+        load_factor = 1 + (df['load_weight'] / df['vehicle_capacity']) * 0.3
+        hour_factor = np.where((df['hour_of_day'] >= 8) & (df['hour_of_day'] <= 18), 1.2, 1.0)
+        
+        df['delivery_time_hours'] = base_time * traffic_factor * weather_factor * load_factor * hour_factor
+        df['delivery_time_hours'] += np.random.normal(0, 0.5, n_samples)  # Add noise
+        df['delivery_time_hours'] = np.maximum(df['delivery_time_hours'], 0.5)  # Minimum 30 minutes
+        
+        # Calculate fuel consumption
+        base_consumption = df['distance_km'] * 0.15  # 15 liters per 100km base
+        load_consumption = (df['load_weight'] / df['vehicle_capacity']) * df['distance_km'] * 0.05
+        traffic_consumption = df['traffic_density'] * df['distance_km'] * 0.03
+        
+        df['fuel_consumption_liters'] = base_consumption + load_consumption + traffic_consumption
+        df['fuel_cost'] = df['fuel_consumption_liters'] * df['fuel_price']
+        
+        # Generate demand data
+        df['daily_demand'] = np.random.poisson(50, n_samples) + \
+                           np.sin(df['day_of_week'] * np.pi / 3.5) * 20 + \
+                           np.random.normal(0, 10, n_samples)
+        df['daily_demand'] = np.maximum(df['daily_demand'], 1)
+        
+        return df
+    
+    def preprocess_data(self, df):
+        """Preprocess and engineer features"""
+        # Feature engineering
+        df['load_ratio'] = df['load_weight'] / df['vehicle_capacity']
+        df['rush_hour'] = ((df['hour_of_day'] >= 8) & (df['hour_of_day'] <= 10) | 
+                          (df['hour_of_day'] >= 17) & (df['hour_of_day'] <= 19)).astype(int)
+        df['weekend'] = (df['day_of_week'] >= 6).astype(int)
+        df['efficiency_score'] = df['distance_km'] / (df['delivery_time_hours'] * df['fuel_consumption_liters'])
+        
+        return df
+    
+    def train_delivery_time_model(self, df):
+        """Train model to predict delivery times"""
+        features = ['distance_km', 'traffic_density', 'weather_score', 'load_ratio', 
+                   'hour_of_day', 'rush_hour', 'weekend']
+        
+        X = df[features]
+        y = df['delivery_time_hours']
+        
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        # Scale features
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
+        
+        # Train Random Forest model
+        self.delivery_model = RandomForestRegressor(n_estimators=100, random_state=42)
+        self.delivery_model.fit(X_train_scaled, y_train)
+        
+        # Evaluate model
+        y_pred = self.delivery_model.predict(X_test_scaled)
+        mse = mean_squared_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+        
+        print(f"Delivery Time Prediction Model:")
+        print(f"MSE: {mse:.4f}")
+        print(f"R² Score: {r2:.4f}")
+        print(f"RMSE: {np.sqrt(mse):.4f} hours\n")
+        
+        return X_test, y_test, y_pred
+    
+    def optimize_routes(self, df):
+        """Cluster delivery locations for route optimization"""
+        coords = df[['hub_lat', 'hub_lng']].values
+        
+        # Use K-means clustering to group nearby locations
+        n_clusters = min(10, len(df) // 20 + 1)  # Adaptive cluster count
+        self.hub_clusters = KMeans(n_clusters=n_clusters, random_state=42)
+        cluster_labels = self.hub_clusters.fit_predict(coords)
+        
+        df['cluster'] = cluster_labels
+        
+        # Calculate route efficiency for each cluster
+        route_stats = []
+        for cluster_id in range(n_clusters):
+            cluster_data = df[df['cluster'] == cluster_id]
+            if len(cluster_data) > 0:
+                avg_distance = cluster_data['distance_km'].mean()
+                avg_time = cluster_data['delivery_time_hours'].mean()
+                total_demand = cluster_data['daily_demand'].sum()
+                efficiency = total_demand / (avg_distance + avg_time)
+                
+                route_stats.append({
+                    'cluster_id': cluster_id,
+                    'locations': len(cluster_data),
+                    'avg_distance_km': avg_distance,
+                    'avg_delivery_time': avg_time,
+                    'total_demand': total_demand,
+                    'efficiency_score': efficiency
+                })
+        
+        route_df = pd.DataFrame(route_stats)
+        return route_df
+    
+    def predict_demand(self, df):
+        """Simple demand forecasting model"""
+        features = ['day_of_week', 'hour_of_day', 'weather_score', 'cluster']
+        X = df[features]
+        y = df['daily_demand']
+        
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        self.demand_model = RandomForestRegressor(n_estimators=50, random_state=42)
+        self.demand_model.fit(X_train, y_train)
+        
+        y_pred = self.demand_model.predict(X_test)
+        r2 = r2_score(y_test, y_pred)
+        
+        print(f"Demand Forecasting Model:")
+        print(f"R² Score: {r2:.4f}\n")
+        
+        return X_test, y_test, y_pred
+    
+    def calculate_savings(self, df):
+        """Calculate potential cost savings"""
+        # Baseline: current operations
+        current_fuel_cost = df['fuel_cost'].sum()
+        current_avg_time = df['delivery_time_hours'].mean()
+        
+        # Optimized: assume 15% improvement in efficiency
+        optimized_fuel_cost = current_fuel_cost * 0.85
+        optimized_avg_time = current_avg_time * 0.85
+        
+        fuel_savings = current_fuel_cost - optimized_fuel_cost
+        time_savings_hours = (current_avg_time - optimized_avg_time) * len(df)
+        
+        # Assume labor cost of ₹200 per hour
+        labor_cost_savings = time_savings_hours * 200
+        
+        total_savings = fuel_savings + labor_cost_savings
+        
+        return {
+            'fuel_savings': fuel_savings,
+            'time_savings_hours': time_savings_hours,
+            'labor_cost_savings': labor_cost_savings,
+            'total_savings': total_savings,
+            'efficiency_improvement': '15%'
+        }
+    
+    def visualize_results(self, df, route_stats, delivery_pred_results):
+        """Create visualizations"""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        
+        # 1. Delivery Time Prediction
+        X_test, y_test, y_pred = delivery_pred_results
+        axes[0,0].scatter(y_test, y_pred, alpha=0.6, color='blue')
+        axes[0,0].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
+        axes[0,0].set_xlabel('Actual Delivery Time (hours)')
+        axes[0,0].set_ylabel('Predicted Delivery Time (hours)')
+        axes[0,0].set_title('Delivery Time Prediction Accuracy')
+        
+        # 2. Route Efficiency by Cluster
+        axes[0,1].bar(route_stats['cluster_id'], route_stats['efficiency_score'], 
+                     color='green', alpha=0.7)
+        axes[0,1].set_xlabel('Route Cluster')
+        axes[0,1].set_ylabel('Efficiency Score')
+        axes[0,1].set_title('Route Efficiency by Cluster')
+        
+        # 3. Fuel Consumption vs Distance
+        axes[1,0].scatter(df['distance_km'], df['fuel_consumption_liters'], 
+                         c=df['traffic_density'], cmap='Reds', alpha=0.6)
+        axes[1,0].set_xlabel('Distance (km)')
+        axes[1,0].set_ylabel('Fuel Consumption (liters)')
+        axes[1,0].set_title('Fuel Consumption vs Distance (Color = Traffic Density)')
+        
+        # 4. Demand Distribution
+        axes[1,1].hist(df['daily_demand'], bins=30, alpha=0.7, color='orange', edgecolor='black')
+        axes[1,1].set_xlabel('Daily Demand')
+        axes[1,1].set_ylabel('Frequency')
+        axes[1,1].set_title('Daily Demand Distribution')
+        
+        plt.tight_layout()
+        plt.show()
+    
+    def generate_recommendations(self, route_stats, savings):
+        """Generate actionable recommendations"""
+        print("=== LOGISTICS OPTIMIZATION RECOMMENDATIONS ===\n")
+        
+        print("1. ROUTE OPTIMIZATION:")
+        best_routes = route_stats.nlargest(3, 'efficiency_score')
+        print(f"   • Focus on top 3 efficient routes (Clusters: {', '.join(map(str, best_routes['cluster_id'].values))})")
+        print(f"   • These routes serve {best_routes['locations'].sum()} locations efficiently")
+        print(f"   • Average efficiency score: {best_routes['efficiency_score'].mean():.2f}\n")
+        
+        print("2. COST SAVINGS POTENTIAL:")
+        print(f"   • Annual fuel cost savings: ₹{savings['fuel_savings']:,.0f}")
+        print(f"   • Time savings: {savings['time_savings_hours']:,.0f} hours/year")
+        print(f"   • Labor cost savings: ₹{savings['labor_cost_savings']:,.0f}")
+        print(f"   • Total annual savings: ₹{savings['total_savings']:,.0f}\n")
+        
+        print("3. OPERATIONAL IMPROVEMENTS:")
+        print("   • Implement dynamic routing based on traffic conditions")
+        print("   • Use predictive maintenance for vehicles")
+        print("   • Deploy real-time tracking for better customer experience")
+        print("   • Optimize delivery time slots to avoid rush hours\n")
+        
+        print("4. SUSTAINABILITY IMPACT:")
+        co2_reduction = savings['fuel_savings'] / 100 * 2.3  # 2.3 kg CO2 per liter
+        print(f"   • Estimated CO₂ reduction: {co2_reduction:,.0f} kg/year")
+        print("   • Reduced traffic congestion through optimized routes")
+        print("   • Lower fuel consumption contributing to cleaner air\n")
 
-# Displaying the data
-print("Transportation and Logistics Report")
-for mode, count in zip(transport_modes, shipment_counts):
-    print(f"{mode}: {count} shipments")
+def main():
+    # Initialize the logistics optimizer
+    optimizer = LogisticsOptimizer()
+    
+    print("🚛 ML-Based Logistics Optimization System")
+    print("=" * 50)
+    
+    # Generate and preprocess data
+    print("📊 Generating synthetic logistics data...")
+    df = optimizer.generate_sample_data(n_samples=1000)
+    df = optimizer.preprocess_data(df)
+    print(f"Dataset created with {len(df)} delivery records\n")
+    
+    # Train delivery time prediction model
+    print("🤖 Training delivery time prediction model...")
+    delivery_results = optimizer.train_delivery_time_model(df)
+    
+    # Optimize routes using clustering
+    print("🗺️  Optimizing delivery routes...")
+    route_stats = optimizer.optimize_routes(df)
+    print(f"Created {len(route_stats)} optimized route clusters\n")
+    
+    # Train demand forecasting model
+    print("📈 Training demand forecasting model...")
+    demand_results = optimizer.predict_demand(df)
+    
+    # Calculate potential savings
+    print("💰 Calculating cost savings...")
+    savings = optimizer.calculate_savings(df)
+    
+    # Generate visualizations
+    print("📊 Generating visualizations...")
+    optimizer.visualize_results(df, route_stats, delivery_results)
+    
+    # Provide recommendations
+    optimizer.generate_recommendations(route_stats, savings)
+    
+    print("\n✅ Analysis complete! The system demonstrates significant potential")
+    print("   for improving logistics efficiency and reducing operational costs.")
 
-# Creating the bar graph
-plt.figure(figsize=(8, 5))
-bars = plt.bar(transport_modes, shipment_counts, color=['orange', 'green', 'skyblue', 'navy'])
-
-# Adding labels and title
-plt.xlabel('Transport Mode')
-plt.ylabel('Number of Shipments')
-plt.title('Shipment Volume by Transport Mode')
-plt.grid(axis='y', linestyle='--', alpha=0.7)
-
-# Adding value labels on top of bars
-for bar in bars:
-    yval = bar.get_height()
-    plt.text(bar.get_x() + bar.get_width()/2, yval + 20, yval, ha='center', va='bottom')
-
-# Show the plot
-plt.tight_layout()
-plt.show()
+if __name__ == "__main__":
+    main()
